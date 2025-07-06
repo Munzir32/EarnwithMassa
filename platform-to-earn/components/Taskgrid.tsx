@@ -1,12 +1,12 @@
 import React, { useState, useCallback, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card'
 import { Badge } from './ui/badge'
-import { Coins, Users, Trophy, ExternalLink, CheckCircle, Award, TrendingUp, AlertCircle } from 'lucide-react'
+import { Coins, Users, Trophy, ExternalLink, CheckCircle, Award, TrendingUp, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from './ui/button'
 import Link from 'next/link'
-import { useReadContract, useWriteContract, useAccount } from 'wagmi'
+import { useWallet } from '@/hooks/useWallet'
 import { contract } from '@/contract'
-import ABI from '@/contract/ABI.json'
+import { SmartContract, Args } from '@massalabs/massa-web3'
 import { fetchIPFSData } from '@/lib/IpfsDataFetch'
 import { useCreatorReputation } from '@/hooks/useCreatorReputation'
 
@@ -43,54 +43,151 @@ const Taskgrid: React.FC<TaskgridProps> = ({ taskId }) => {
   const [task, setTask] = useState<Task | null>(null)
   const [taskDetails, setTaskDetails] = useState<TaskDetails | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const { data: taskData, isLoading, error } = useReadContract({
-    address: contract as `0x${string}`,
-    abi: ABI,
-    functionName: 'getTask',
-    args: [BigInt(taskId)],
-  })
+  const { isConnected, provider } = useWallet()
 
   // Get creator reputation
   const { stats: creatorStats } = useCreatorReputation(task?.creator || '')
 
-  const processTaskData = useCallback(() => {
-    if (!taskData || !Array.isArray(taskData)) {
+  const fetchTaskData = useCallback(async () => {
+    if (!isConnected || !provider) {
+      console.log("Taskgrid: No provider available")
+      setLoading(false)
       return
     }
 
-    const [creator, tokenGate, rewardToken, details, rewardAmount, submissions, isClosed, winner] = taskData as any
+    try {
+      console.log(`Taskgrid: Fetching task ${taskId}...`)
+      const taskContract = new SmartContract(provider, contract)
+      const args = new Args().addU64(BigInt(taskId))
+      const result = await taskContract.read('getTask', args)
+      const data = result.value
 
-    setTask({
-      id: Number(taskId),
-      creator,
-      tokenGate,
-      rewardToken,
-      details,
-      rewardAmount: rewardAmount.toString(),
-      submissions: submissions || [],
-      isClosed,
-      winner: winner !== '0x0000000000000000000000000000000000000000' ? winner : undefined,
-      status: isClosed ? "Closed" : (submissions?.length >= 3 ? "Full" : "Open"),
-      maxSubmissions: 3
-    })
-  }, [taskData, taskId])
+      if (!data || data.length === 0) {
+        console.log(`Taskgrid: Task ${taskId} is empty`)
+        setError('Task not found or empty')
+        setLoading(false)
+        return
+      }
+
+      // Parse the returned data using Args
+      const argsParsed = new Args(data)
+      console.log(`Taskgrid: Parsing task ${taskId} data:`, argsParsed)
+
+      // Check if the task data is valid (not empty)
+      if (argsParsed.serialized.length === 0) {
+        console.log(`Taskgrid: Task ${taskId} has no data`)
+        setError('Task has no data')
+        setLoading(false)
+        return
+      }
+
+      const creator = argsParsed.nextString()
+      if (!creator || creator === "") {
+        console.log(`Taskgrid: Task ${taskId} has invalid creator`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const tokenGate = argsParsed.nextString()
+      if (!tokenGate || tokenGate === "") {
+        console.log(`Taskgrid: Task ${taskId} has invalid tokenGate`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const rewardToken = argsParsed.nextString()
+      if (!rewardToken || rewardToken === "") {
+        console.log(`Taskgrid: Task ${taskId} has invalid rewardToken`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const rewardAmount = argsParsed.nextU64().toString()
+      if (!rewardAmount || rewardAmount === "0") {
+        console.log(`Taskgrid: Task ${taskId} has invalid rewardAmount`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const details = argsParsed.nextString()
+      if (!details || details === "") {
+        console.log(`Taskgrid: Task ${taskId} has invalid details`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+                const subCount = Number(argsParsed.nextU32())
+          const submissions: Submission[] = []
+          
+          console.log(`Taskgrid: Task ${taskId} has ${subCount} submissions`)
+          for (let j = 0; j < subCount; j++) {
+        const user = argsParsed.nextString()
+        const submissionLink = argsParsed.nextString()
+        
+        if (user && submissionLink) {
+          submissions.push({
+            user,
+            submissionLink
+          })
+        }
+      }
+
+      const isClosed = Number(argsParsed.nextU32()) === 1
+      const winner = argsParsed.nextString()
+      const status = isClosed ? "Closed" : (submissions.length >= 3 ? "Full" : "Open")
+
+      const taskData: Task = {
+        id: Number(taskId),
+        creator,
+        tokenGate,
+        rewardToken,
+        details,
+        rewardAmount,
+        submissions,
+        isClosed,
+        winner: winner !== '0x0000000000000000000000000000000000000000' ? winner : undefined,
+        status,
+        maxSubmissions: 3
+      }
+
+      console.log(`Taskgrid: Fetched task ${taskId}:`, taskData)
+      setTask(taskData)
+    } catch (error) {
+      console.error(`Taskgrid: Error fetching task ${taskId}:`, error)
+      setError('Failed to load task data')
+    } finally {
+      setLoading(false)
+    }
+  }, [isConnected, provider, taskId])
 
   // Parse task details from IPFS
   const parseTaskDetails = useCallback(async () => {
-    if (!task?.details) return
+    if (!task?.details) {
+      console.log("Taskgrid: No task details available")
+      return
+    }
 
     try {
+      console.log("Taskgrid: Fetching task details from IPFS:", task.details)
       const data = await fetchIPFSData(task.details)
+      console.log("Taskgrid: IPFS data fetched:", data)
       setTaskDetails({
         title: data.title || "Untitled Task",
         description: data.description || "No description provided",
         tokenSymbol: data.tokenSymbol
       })
     } catch (error) {
-      console.error('Error while fetching task details:', error)
+      console.error('Taskgrid: Error while fetching task details from IPFS:', error)
       // Fallback to parsing as JSON if IPFS fetch fails
       try {
+        console.log("Taskgrid: Attempting to parse task details as JSON")
         const parsed = JSON.parse(task.details)
         setTaskDetails({
           title: parsed.title || "Untitled Task",
@@ -98,6 +195,7 @@ const Taskgrid: React.FC<TaskgridProps> = ({ taskId }) => {
           tokenSymbol: parsed.tokenSymbol
         })
       } catch {
+        console.log("Taskgrid: Using fallback task details")
         setTaskDetails({
           title: "Untitled Task",
           description: task.details || "No description provided"
@@ -107,18 +205,14 @@ const Taskgrid: React.FC<TaskgridProps> = ({ taskId }) => {
   }, [task?.details])
 
   useEffect(() => {
-    processTaskData()
-  }, [processTaskData])
+    console.log(`Taskgrid: useEffect triggered for task ${taskId}`)
+    fetchTaskData()
+  }, [fetchTaskData])
 
   useEffect(() => {
+    console.log("Taskgrid: parseTaskDetails useEffect triggered")
     parseTaskDetails()
   }, [parseTaskDetails])
-
-  useEffect(() => {
-    if (!isLoading) {
-      setLoading(false)
-    }
-  }, [isLoading])
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -134,28 +228,24 @@ const Taskgrid: React.FC<TaskgridProps> = ({ taskId }) => {
   }
 
   if (loading) {
+    console.log("Taskgrid: Loading state")
     return (
       <Card className="bg-white/60 backdrop-blur-sm border-white/20">
-        <CardContent className="p-6">
-          <div className="animate-pulse">
-            <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
-            <div className="h-3 bg-gray-200 rounded w-1/2 mb-4"></div>
-            <div className="h-3 bg-gray-200 rounded w-full"></div>
-          </div>
+        <CardContent className="flex items-center justify-center py-8">
+          <Loader2 className="w-6 h-6 animate-spin" />
+          <span className="ml-2">Loading task...</span>
         </CardContent>
       </Card>
     )
   }
 
   if (error || !task) {
-    return (
-      <Card className="bg-white/60 backdrop-blur-sm border-white/20">
-        <CardContent className="p-6">
-          <p className="text-red-600">Error loading task</p>
-        </CardContent>
-      </Card>
-    )
+    console.log("Taskgrid: Error or no task state for task ID:", taskId)
+    // Don't render anything for non-existent tasks to avoid cluttering the UI
+    return null
   }
+
+  console.log("Taskgrid: Rendering task:", task)
 
   return (
     <Card
@@ -164,7 +254,7 @@ const Taskgrid: React.FC<TaskgridProps> = ({ taskId }) => {
     >
       <CardHeader>
         <div className="flex justify-between items-start mb-2">
-          <CardTitle className="text-lg line-clamp-2">{taskDetails?.title}</CardTitle>
+          <CardTitle className="text-lg line-clamp-2">{taskDetails?.title || `Task #${taskId}`}</CardTitle>
           <Badge className={getStatusColor(task.status)}>{task.status}</Badge>
         </div>
         <CardDescription className="line-clamp-3 flex items-center gap-2">
@@ -181,49 +271,31 @@ const Taskgrid: React.FC<TaskgridProps> = ({ taskId }) => {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <p className="text-gray-600 mb-3 line-clamp-2">{taskDetails?.description}</p>
+        <p className="text-gray-600 mb-4 line-clamp-3">{taskDetails?.description}</p>
         
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <span className="text-sm text-gray-600">Token Required:</span>
-            <Badge variant="outline" className="font-semibold text-purple-600 border-purple-200">
-              {taskDetails?.tokenSymbol || "Token"}
-            </Badge>
+        <div className="grid grid-cols-2 gap-4 text-sm mb-4">
+          <div className="flex items-center gap-2">
+            <Coins className="w-4 h-4 text-green-600" />
+            <span>{task.rewardAmount} tokens</span>
           </div>
-
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2">
-              <Coins className="w-4 h-4 text-green-600" />
-              <span className="font-semibold">{task.rewardAmount} tokens</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Users className="w-4 h-4 text-blue-600" />
-              <span className="text-sm text-gray-600">
-                {task.submissions.length}/{task.maxSubmissions}
-              </span>
-            </div>
+          <div className="flex items-center gap-2">
+            <Users className="w-4 h-4 text-blue-600" />
+            <span>{task.submissions.length}/{task.maxSubmissions}</span>
           </div>
+        </div>
 
-          <div className="w-full bg-gray-200 rounded-full h-2">
-            <div
-              className="bg-gradient-to-r from-purple-500 to-blue-500 h-2 rounded-full transition-all duration-300"
-              style={{ width: `${(task.submissions.length / task.maxSubmissions) * 100}%` }}
-            ></div>
-          </div>
-
-          <Link href={`/task/${task.id}`}>
-            <Button
-              className="w-full"
-              variant={task.status === "Open" ? "default" : "secondary"}
-              disabled={task.status === "Closed"}
-            >
-              {task.status === "Open"
-                ? "View & Submit"
-                : task.status === "Full"
-                  ? "View Submissions"
-                  : "Task Closed"}
+        <div className="flex gap-2">
+          <Link href={`/task/${taskId}`} className="flex-1">
+            <Button className="w-full bg-gradient-to-r from-purple-600 to-blue-600">
+              View Details
             </Button>
           </Link>
+          {task.winner && (
+            <Badge variant="outline" className="text-green-600 border-green-200">
+              <Trophy className="w-3 h-3 mr-1" />
+              Winner
+            </Badge>
+          )}
         </div>
       </CardContent>
     </Card>

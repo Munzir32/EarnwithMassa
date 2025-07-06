@@ -12,11 +12,11 @@ import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Coins, Users, ExternalLink, Wallet, CheckCircle, AlertCircle, Clock } from "lucide-react"
 import Link from "next/link"
-import { useReadContract, useWriteContract, useAccount } from "wagmi"
+import { useWallet } from "@/hooks/useWallet"
 import { contract } from "@/contract"
-import ABI from "@/contract/ABI.json"
+import { SmartContract, Args } from "@massalabs/massa-web3"
 import { fetchIPFSData } from '@/lib/IpfsDataFetch'
-import { ConnectButton } from "@rainbow-me/rainbowkit"
+import { toast } from "@/hooks/use-toast"
 import CreatorReputation from "@/components/CreatorReputation"
 
 // ERC20 ABI for balance checking
@@ -56,20 +56,7 @@ interface TaskDetails {
   tokenSymbol?: string
 }
 
-interface NoditTokenResponse {
-  rpp: number
-  items: Array<{
-    ownerAddress: string
-    balance: string
-    contract: {
-      address: string
-      type: string
-      name: string
-      symbol: string
-      decimals: number
-    }
-  }>
-}
+
 
 export default function TaskDetailPage() {
   const params = useParams()
@@ -83,129 +70,194 @@ export default function TaskDetailPage() {
   const [hasRequiredToken, setHasRequiredToken] = useState(false)
   const [hasSubmitted, setHasSubmitted] = useState(false)
   const [checkingToken, setCheckingToken] = useState(false)
-  const { address } = useAccount()
+  const [error, setError] = useState<string | null>(null)
 
-  const { writeContract, isPending: isSubmitting } = useWriteContract()
+  const { isConnected, provider, address } = useWallet()
 
-  // Read task data from contract
-  const { data: taskData, isLoading, error } = useReadContract({
-    address: contract as `0x${string}`,
-    abi: ABI,
-    functionName: 'getTask',
-    args: [BigInt(taskId)],
-  })
+  // Fetch task data from contract
+  const fetchTaskData = useCallback(async () => {
+    if (!isConnected || !provider) {
+      console.log("TaskDetailPage: No provider available")
+      setLoading(false)
+      return
+    }
 
-  // Check if user has already submitted to this task
-  const { data: hasUserSubmitted } = useReadContract({
-    address: contract as `0x${string}`,
-    abi: ABI,
-    functionName: 'hasSubmitted',
-    args: [BigInt(taskId), address as `0x${string}`],
-    query: {
-      enabled: !!address && !!taskId,
-    },
-  })
+    try {
+      console.log(`TaskDetailPage: Fetching task ${taskId}...`)
+      const taskContract = new SmartContract(provider, contract)
+      const args = new Args().addU64(BigInt(taskId))
+      const result = await taskContract.read('getTask', args)
+      const data = result.value
 
-  // Check if user has required token using Nodit API
+      if (!data || data.length === 0) {
+        console.log(`TaskDetailPage: Task ${taskId} is empty`)
+        setError('Task not found or empty')
+        setLoading(false)
+        return
+      }
+
+      // Parse the returned data using Args
+      const argsParsed = new Args(data)
+      console.log(`TaskDetailPage: Parsing task ${taskId} data:`, argsParsed)
+
+      // Check if the task data is valid (not empty)
+      if (argsParsed.serialized.length === 0) {
+        console.log(`TaskDetailPage: Task ${taskId} has no data`)
+        setError('Task has no data')
+        setLoading(false)
+        return
+      }
+
+      const creator = argsParsed.nextString()
+      if (!creator || creator === "") {
+        console.log(`TaskDetailPage: Task ${taskId} has invalid creator`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const tokenGate = argsParsed.nextString()
+      if (!tokenGate || tokenGate === "") {
+        console.log(`TaskDetailPage: Task ${taskId} has invalid tokenGate`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const rewardToken = argsParsed.nextString()
+      if (!rewardToken || rewardToken === "") {
+        console.log(`TaskDetailPage: Task ${taskId} has invalid rewardToken`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const rewardAmount = argsParsed.nextU64().toString()
+      if (!rewardAmount || rewardAmount === "0") {
+        console.log(`TaskDetailPage: Task ${taskId} has invalid rewardAmount`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+      const details = argsParsed.nextString()
+      if (!details || details === "") {
+        console.log(`TaskDetailPage: Task ${taskId} has invalid details`)
+        setError('Invalid task data')
+        setLoading(false)
+        return
+      }
+
+                const subCount = Number(argsParsed.nextU32())
+          const submissions: Submission[] = []
+          
+          console.log(`TaskDetailPage: Task ${taskId} has ${subCount} submissions`)
+          for (let j = 0; j < subCount; j++) {
+        const user = argsParsed.nextString()
+        const submissionLink = argsParsed.nextString()
+        
+        if (user && submissionLink) {
+          submissions.push({
+            user,
+            submissionLink,
+            timestamp: new Date().toISOString() // Using current time as fallback
+          })
+        }
+      }
+
+      const isClosed = Number(argsParsed.nextU32()) === 1
+      const winner = argsParsed.nextString()
+      const status = isClosed ? "Closed" : (submissions.length >= 3 ? "Full" : "Open")
+
+      const taskData: Task = {
+        id: Number(taskId),
+        creator,
+        tokenGate,
+        rewardToken,
+        details,
+        rewardAmount,
+        submissions,
+        isClosed,
+        winner: winner !== '0x0000000000000000000000000000000000000000' ? winner : undefined,
+        status,
+        maxSubmissions: 3
+      }
+
+      console.log(`TaskDetailPage: Fetched task ${taskId}:`, taskData)
+      setTask(taskData)
+    } catch (error) {
+      console.error(`TaskDetailPage: Error fetching task ${taskId}:`, error)
+      setError('Failed to load task data')
+    } finally {
+      setLoading(false)
+    }
+  }, [isConnected, provider, taskId])
+
+  // Check if user has already submitted
+  const checkUserSubmission = useCallback(async () => {
+    if (!isConnected || !provider || !address) {
+      return
+    }
+
+    try {
+      const taskContract = new SmartContract(provider, contract)
+      const args = new Args()
+        .addU64(BigInt(taskId))
+        .addString(address)
+      
+      const result = await taskContract.read('hasSubmitted', args)
+      setHasSubmitted(Boolean(result.value))
+    } catch (error) {
+      console.error('Error checking user submission:', error)
+    }
+  }, [isConnected, provider, address, taskId])
+
+  // Check if user has required token (simplified for demo)
   const checkTokenBalance = useCallback(async (userAddress: string, tokenGateAddress: string) => {
     if (!userAddress || !tokenGateAddress) return false
 
     setCheckingToken(true)
     try {
-     
-      const apiKey = process.env.NEXT_PUBLIC_NODIT_API_KEY || 'nodit-demo'
-      
-      const response = await fetch('https://web3.nodit.io/v1/ethereum/sepolia/token/getTokensOwnedByAccount', {
-        method: 'POST',
-        headers: {
-          'X-API-KEY': apiKey,
-          'accept': 'application/json',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          accountAddress: userAddress,
-          withCount: false
-        })
-      })
-
-      if (response.ok) {
-        const data: NoditTokenResponse = await response.json()
-        
-        const hasToken = data.items.some(item => 
-          item.contract.address.toLowerCase() === tokenGateAddress.toLowerCase() && 
-          BigInt(item.balance) > 0
-        )
-
-        setHasRequiredToken(hasToken)
-        return hasToken
-      } else {
-        console.warn('Nodit API error:', response.status, response.statusText)
-        return await checkTokenBalanceDirect(userAddress, tokenGateAddress)
-      }
+      // For demo purposes, allow all submissions
+      // In production, you would check the actual token balance on Massa blockchain
+      console.log('Demo mode: Allowing submission for testing purposes')
+      setHasRequiredToken(true)
+      return true
     } catch (error) {
       console.error('Error checking token balance:', error)
-      return await checkTokenBalanceDirect(userAddress, tokenGateAddress)
+      // Fallback: allow submission for demo
+      setHasRequiredToken(true)
+      return true
     } finally {
       setCheckingToken(false)
     }
   }, [])
 
-  const checkTokenBalanceDirect = async (userAddress: string, tokenGateAddress: string): Promise<boolean> => {
-    try {
-      console.log('Using direct contract call to check token balance')
-      
-      
-      
-      // Demo fallback - allow submission for testing
-      console.log('Demo mode: Allowing submission for testing purposes')
-      setHasRequiredToken(true)
-      return true
-    } catch (error) {
-      console.error('Error in direct contract call:', error)
-      // Final fallback: allow submission for demo
-      setHasRequiredToken(true)
-      return true
-    }
-  }
 
-  // Process task data
-  const processTaskData = useCallback(() => {
-    if (!taskData || !Array.isArray(taskData)) {
-      return
-    }
 
-    const [creator, tokenGate, rewardToken, details, rewardAmount, submissions, isClosed, winner] = taskData as any
 
-    setTask({
-      id: Number(taskId),
-      creator,
-      tokenGate,
-      rewardToken,
-      details,
-      rewardAmount: rewardAmount.toString(),
-      submissions: submissions || [],
-      isClosed,
-      winner: winner !== '0x0000000000000000000000000000000000000000' ? winner : undefined,
-      status: isClosed ? "Closed" : (submissions?.length >= 3 ? "Full" : "Open"),
-      maxSubmissions: 3
-    })
-  }, [taskData, taskId])
 
   // Parse task details from IPFS
   const parseTaskDetails = useCallback(async () => {
-    if (!task?.details) return
+    if (!task?.details) {
+      console.log("TaskDetailPage: No task details available")
+      return
+    }
 
     try {
+      console.log("TaskDetailPage: Fetching task details from IPFS:", task.details)
       const data = await fetchIPFSData(task.details)
+      console.log("TaskDetailPage: IPFS data fetched:", data)
       setTaskDetails({
         title: data.title || "Untitled Task",
         description: data.description || "No description provided",
         tokenSymbol: data.tokenSymbol
       })
     } catch (error) {
-      console.error('Error while fetching task details:', error)
+      console.error('TaskDetailPage: Error while fetching task details from IPFS:', error)
       // Fallback to parsing as JSON if IPFS fetch fails
       try {
+        console.log("TaskDetailPage: Attempting to parse task details as JSON")
         const parsed = JSON.parse(task.details)
         setTaskDetails({
           title: parsed.title || "Untitled Task",
@@ -213,6 +265,7 @@ export default function TaskDetailPage() {
           tokenSymbol: parsed.tokenSymbol
         })
       } catch {
+        console.log("TaskDetailPage: Using fallback task details")
         setTaskDetails({
           title: "Untitled Task",
           description: task.details || "No description provided"
@@ -226,24 +279,40 @@ export default function TaskDetailPage() {
     e.preventDefault()
     if (!submissionLink.trim() || !task) return
 
+    if (!isConnected || !provider || !address) {
+      toast({
+        title: "Wallet Not Connected",
+        description: "Please connect your wallet first",
+        variant: "destructive",
+      })
+      return
+    }
+
     setSubmitting(true)
 
     try {
-      await writeContract({
-        address: contract as `0x${string}`,
-        abi: ABI,
-        functionName: 'submitToTask',
-        args: [BigInt(task.id), submissionLink],
+      const taskContract = new SmartContract(provider, contract)
+      const args = new Args()
+        .addU64(BigInt(task.id))
+        .addString(submissionLink)
+
+      await taskContract.call('submitToTask', args)
+
+      toast({
+        title: "Submission Successful",
+        description: "Your submission has been recorded!",
       })
 
       setHasSubmitted(true)
       setSubmissionLink("")
       
-      // Note: The hasSubmitted state will be automatically updated via the useReadContract hook
-      // when the transaction is confirmed and the contract state changes
-      
     } catch (error) {
       console.error('Error submitting to task:', error)
+      toast({
+        title: "Submission Failed",
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+        variant: "destructive",
+      })
     } finally {
       setSubmitting(false)
     }
@@ -264,18 +333,18 @@ export default function TaskDetailPage() {
   }
 
   useEffect(() => {
-    processTaskData()
-  }, [processTaskData])
+    console.log(`TaskDetailPage: useEffect triggered for task ${taskId}`)
+    fetchTaskData()
+  }, [fetchTaskData])
 
   useEffect(() => {
+    console.log("TaskDetailPage: parseTaskDetails useEffect triggered")
     parseTaskDetails()
   }, [parseTaskDetails])
 
   useEffect(() => {
-    if (!isLoading) {
-      setLoading(false)
-    }
-  }, [isLoading])
+    checkUserSubmission()
+  }, [checkUserSubmission])
 
   // Check token balance when address or task changes
   useEffect(() => {
@@ -285,13 +354,6 @@ export default function TaskDetailPage() {
       setHasRequiredToken(false)
     }
   }, [address, task?.tokenGate, checkTokenBalance])
-
-  // Update hasSubmitted state based on contract data
-  useEffect(() => {
-    if (hasUserSubmitted !== undefined) {
-      setHasSubmitted(Boolean(hasUserSubmitted))
-    }
-  }, [hasUserSubmitted])
 
   if (loading) {
     return (
@@ -395,7 +457,9 @@ export default function TaskDetailPage() {
                   <div className="text-center py-8">
                     <Wallet className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                     <p className="text-gray-600 mb-4">Connect your wallet to submit</p>
-                    <ConnectButton />
+                    <Button onClick={() => window.location.reload()}>
+                      Connect Wallet
+                    </Button>
                   </div>
                 ) : checkingToken ? (
                   <div className="text-center py-8">
@@ -446,13 +510,13 @@ export default function TaskDetailPage() {
                       </p>
                     </div>
 
-                    <Button
-                      type="submit"
-                      className="w-full bg-gradient-to-r from-purple-600 to-blue-600"
-                      disabled={submitting || isSubmitting || !submissionLink.trim()}
-                    >
-                      {submitting || isSubmitting ? "Submitting..." : "Submit Work"}
-                    </Button>
+                                      <Button
+                    type="submit"
+                    className="w-full bg-gradient-to-r from-purple-600 to-blue-600"
+                    disabled={submitting || !submissionLink.trim()}
+                  >
+                    {submitting ? "Submitting..." : "Submit Work"}
+                  </Button>
                   </form>
                 )}
               </CardContent>

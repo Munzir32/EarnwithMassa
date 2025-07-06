@@ -1,13 +1,18 @@
+"use client"
+
 import React, { useState, useCallback, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Trophy, ExternalLink, CheckCircle, Award, TrendingUp, AlertCircle } from "lucide-react"
+import { Trophy, ExternalLink, CheckCircle, Award, TrendingUp, AlertCircle, Loader2, MoreHorizontal, Eye, User, Coins, Calendar, Clock } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { contract } from "@/contract"
-import ABI from "@/contract/ABI.json"
-import { useReadContract, useWriteContract, useAccount } from 'wagmi'
+import { useWallet } from "@/hooks/useWallet"
+import { SmartContract, Args } from "@massalabs/massa-web3"
 import { fetchIPFSData } from '@/lib/IpfsDataFetch'
 import { useCreatorReputation } from '@/hooks/useCreatorReputation'
+import { toast } from "@/hooks/use-toast"
+import { useTasks } from '@/hooks/useTasks'
 
 interface Submission {
     user: string
@@ -39,62 +44,39 @@ interface TaskDetails {
 }
 
 const TaskCard: React.FC<TaskCardProps> = ({ id }) => {
-    const [task, setTask] = useState<Task | null>(null)
     const [taskDetails, setTaskDetails] = useState<TaskDetails | null>(null)
-    const [pickingWinner, setPickingWinner] = useState(false)
-    const { address } = useAccount()
+    const [isLoading, setIsLoading] = useState<string | null>(null)
 
-    const { writeContract, isPending: isPickingWinner } = useWriteContract()
+    const { provider, address } = useWallet()
+    const { tasks, isFetching, refetch } = useTasks()
 
-    // Read task data from contract
-    const { data: taskData, isLoading, error } = useReadContract({
-        address: contract as `0x${string}`,
-        abi: ABI,
-        functionName: 'getTask',
-        args: [BigInt(id)],
-    })
+    // Find the specific task by ID
+    const task = tasks.find(t => t.id === Number(id))
 
     // Get creator reputation
     const { stats: creatorStats } = useCreatorReputation(task?.creator || '')
 
-    // Process task data
-    const processTaskData = useCallback(() => {
-        if (!taskData || !Array.isArray(taskData)) {
+    // Parse task details from IPFS
+    const parseTaskDetails = useCallback(async () => {
+        if (!task?.details) {
+            console.log("No task details available")
             return
         }
 
-        const [creator, tokenGate, rewardToken, details, rewardAmount, submissions, isClosed, winner] = taskData as any
-
-        setTask({
-            id: Number(id),
-            creator,
-            tokenGate,
-            rewardToken,
-            details,
-            rewardAmount: rewardAmount.toString(),
-            submissions: submissions || [],
-            isClosed,
-            winner: winner !== '0x0000000000000000000000000000000000000000' ? winner : undefined,
-            status: isClosed ? "Closed" : (submissions?.length >= 3 ? "Full" : "Open"),
-            maxSubmissions: 3
-        })
-    }, [taskData, id])
-
-    // Parse task details from IPFS
-    const parseTaskDetails = useCallback(async () => {
-        if (!task?.details) return
-
         try {
+            console.log("Fetching task details from IPFS:", task.details)
             const data = await fetchIPFSData(task.details)
+            console.log("IPFS data fetched:", data)
             setTaskDetails({
                 title: data.title || "Untitled Task",
                 description: data.description || "No description provided",
                 tokenSymbol: data.tokenSymbol
             })
         } catch (error) {
-            console.error('Error while fetching task details:', error)
+            console.error('Error while fetching task details from IPFS:', error)
             // Fallback to parsing as JSON if IPFS fetch fails
             try {
+                console.log("Attempting to parse task details as JSON")
                 const parsed = JSON.parse(task.details)
                 setTaskDetails({
                     title: parsed.title || "Untitled Task",
@@ -102,6 +84,7 @@ const TaskCard: React.FC<TaskCardProps> = ({ id }) => {
                     tokenSymbol: parsed.tokenSymbol
                 })
             } catch {
+                console.log("Using fallback task details")
                 setTaskDetails({
                     title: "Untitled Task",
                     description: task.details || "No description provided"
@@ -112,20 +95,39 @@ const TaskCard: React.FC<TaskCardProps> = ({ id }) => {
 
     // Handle picking winner
     const handlePickWinner = async (winnerAddress: string) => {
-        if (!task) return
+        if (!task || !provider) {
+            console.log("Cannot pick winner: no task or provider")
+            return
+        }
 
-        setPickingWinner(true)
+        console.log("Picking winner for task:", task.id, "winner:", winnerAddress)
+        setIsLoading('pickWinner')
         try {
-            await writeContract({
-                address: contract as `0x${string}`,
-                abi: ABI,
-                functionName: 'pickWinner',
-                args: [BigInt(task.id), winnerAddress as `0x${string}`],
+            const taskContract = new SmartContract(provider, contract)
+            const args = new Args()
+                .addU64(BigInt(task.id))
+                .addString(winnerAddress)
+
+            console.log("Calling pickWinner with args:", args)
+            await taskContract.call('pickWinner', args)
+            
+            toast({
+                title: "Winner Selected",
+                description: `Winner selected successfully: ${formatAddress(winnerAddress)}`,
             })
+            
+            // Refresh task data
+            console.log("Refreshing task data after picking winner")
+            await refetch()
         } catch (error) {
             console.error('Error picking winner:', error)
+            toast({
+                title: "Failed to Pick Winner",
+                description: error instanceof Error ? error.message : "Failed to select winner",
+                variant: "destructive",
+            })
         } finally {
-            setPickingWinner(false)
+            setIsLoading(null)
         }
     }
 
@@ -149,45 +151,66 @@ const TaskCard: React.FC<TaskCardProps> = ({ id }) => {
     }
 
     useEffect(() => {
-        processTaskData()
-    }, [processTaskData])
-
-    useEffect(() => {
+        console.log("TaskCard useEffect triggered, task:", task)
         parseTaskDetails()
     }, [parseTaskDetails])
 
-    if (isLoading) {
+    if (isFetching) {
+        console.log("TaskCard: Loading state")
+        return (
+            <Card className="bg-white/60 backdrop-blur-sm border-white/20">
+                <CardContent className="flex items-center justify-center py-8">
+                    <Loader2 className="w-6 h-6 animate-spin" />
+                    <span className="ml-2">Loading task data...</span>
+                </CardContent>
+            </Card>
+        )
+    }
+
+    if (!task) {
+        console.log("TaskCard: No task found for id:", id)
         return (
             <Card className="bg-white/60 backdrop-blur-sm border-white/20">
                 <CardContent className="p-6">
-                    <div className="animate-pulse">
-                        <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
-                        <div className="h-3 bg-gray-200 rounded w-1/2 mb-4"></div>
-                        <div className="h-3 bg-gray-200 rounded w-full"></div>
+                    <div className="text-center">
+                        <p className="text-gray-600 mb-2">Task not found</p>
+                        <p className="text-sm text-gray-500 mb-4">
+                            The requested task could not be loaded from the blockchain.
+                        </p>
+                        <Button 
+                            size="sm" 
+                            onClick={() => {
+                                console.log("Retrying to fetch task data")
+                                refetch()
+                            }}
+                            className="bg-gradient-to-r from-purple-600 to-blue-600"
+                        >
+                            Retry
+                        </Button>
                     </div>
                 </CardContent>
             </Card>
         )
     }
 
-    if (error || !task) {
-        return (
-            <Card className="bg-white/60 backdrop-blur-sm border-white/20">
-                <CardContent className="p-6">
-                    <p className="text-red-600">Error loading task</p>
-                </CardContent>
-            </Card>
-        )
-    }
+    console.log("TaskCard: Rendering task:", task)
 
     return (
         <Card className="bg-white/60 backdrop-blur-sm border-white/20">
-            <CardHeader>
-                <div className="flex justify-between items-start">
-                    <div>
-                        <CardTitle className="text-xl mb-2">{taskDetails?.title}</CardTitle>
-                        <CardDescription className="flex items-center gap-2">
-                            Created by {formatAddress(task.creator)}
+            <CardHeader className="pb-3">
+                <div className="flex items-start justify-between">
+                    <div className="space-y-1">
+                        <CardTitle className="text-lg font-semibold">{taskDetails?.title || `Task #${id}`}</CardTitle>
+                        <div className="flex items-center gap-2">
+                            <Badge className={getStatusColor(task.status)}>
+                                {task.status.charAt(0).toUpperCase() + task.status.slice(1)}
+                            </Badge>
+                            {task.winner && (
+                                <Badge variant="outline" className="text-green-600 border-green-200">
+                                    <Trophy className="w-3 h-3 mr-1" />
+                                    Winner Selected
+                                </Badge>
+                            )}
                             {creatorStats && (
                                 <Badge variant="outline" className="text-xs">
                                     {creatorStats.reputation === 'Excellent' && <Award className="w-3 h-3 mr-1" />}
@@ -197,77 +220,106 @@ const TaskCard: React.FC<TaskCardProps> = ({ id }) => {
                                     {creatorStats.reputation}
                                 </Badge>
                             )}
-                        </CardDescription>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <Badge className={getStatusColor(task.status)}>{task.status}</Badge>
-                        {task.winner && (
-                            <Badge variant="outline" className="text-green-600 border-green-200">
-                                <Trophy className="w-3 h-3 mr-1" />
-                                Winner Selected
-                            </Badge>
-                        )}
                     </div>
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="sm">
+                                <MoreHorizontal className="w-4 h-4" />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => window.open(`/task/${id}`, '_blank')}>
+                                <Eye className="w-4 h-4 mr-2" />
+                                View Details
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                 </div>
             </CardHeader>
-            <CardContent>
-                <p className="text-gray-600 mb-4">{taskDetails?.description}</p>
+            <CardContent className="space-y-4">
+                <p className="text-gray-600">{taskDetails?.description}</p>
                 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                    <div>
-                        <span className="text-sm text-gray-600">Token Gate:</span>
-                        <p className="font-mono text-sm">{formatAddress(task.tokenGate)}</p>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div className="space-y-1">
+                        <div className="flex items-center gap-1 text-muted-foreground">
+                            <User className="w-3 h-3" />
+                            Creator
+                        </div>
+                        <p className="font-mono text-xs">{formatAddress(task.creator)}</p>
                     </div>
-                    <div>
-                        <span className="text-sm text-gray-600">Reward:</span>
+
+                    <div className="space-y-1">
+                        <div className="flex items-center gap-1 text-muted-foreground">
+                            <Coins className="w-3 h-3" />
+                            Reward
+                        </div>
                         <p className="font-semibold">{task.rewardAmount} tokens</p>
                     </div>
-                    <div>
-                        <span className="text-sm text-gray-600">Submissions:</span>
-                        <p className="font-semibold">
-                            {task.submissions.length}/{task.maxSubmissions}
-                        </p>
+
+                    <div className="space-y-1">
+                        <div className="flex items-center gap-1 text-muted-foreground">
+                            <Calendar className="w-3 h-3" />
+                            Submissions
+                        </div>
+                        <p>{task.submissions.length}/{task.maxSubmissions}</p>
+                    </div>
+
+                    <div className="space-y-1">
+                        <div className="flex items-center gap-1 text-muted-foreground">
+                            <Clock className="w-3 h-3" />
+                            Status
+                        </div>
+                        <p>{task.status}</p>
                     </div>
                 </div>
 
                 {task.submissions.length > 0 && (
-                    <div>
-                        <h4 className="font-semibold mb-3">Submissions:</h4>
-                        <div className="space-y-3">
+                    <div className="pt-2 border-t">
+                        <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
+                            <span>Submissions: {task.submissions.length}</span>
+                            <span>Max: {task.maxSubmissions}</span>
+                        </div>
+
+                        <div className="space-y-2">
                             {task.submissions.map((submission: Submission, index: number) => (
-                                <div key={index} className="border border-gray-200 rounded-lg p-4 bg-white/40">
-                                    <div className="flex justify-between items-start mb-2">
-                                        <span className="font-mono text-sm text-gray-600">
+                                <div key={index} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-mono text-xs text-gray-600">
                                             {formatAddress(submission.user)}
                                         </span>
+                                        {task.winner === submission.user && (
+                                            <Badge variant="outline" className="text-green-600 border-green-200 text-xs">
+                                                <CheckCircle className="w-3 h-3 mr-1" />
+                                                Winner
+                                            </Badge>
+                                        )}
                                     </div>
-                                    <div className="flex justify-between items-center">
-                                        <a
-                                            href={submission.submissionLink}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="text-purple-600 hover:text-purple-700 text-sm flex items-center gap-1"
+                                    <div className="flex gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => window.open(submission.submissionLink, '_blank')}
                                         >
-                                            View Submission
-                                            <ExternalLink className="w-3 h-3" />
-                                        </a>
+                                            <ExternalLink className="w-3 h-3 mr-1" />
+                                            View
+                                        </Button>
                                         {task.status !== "Closed" && address === task.creator && (
                                             <Button
                                                 size="sm"
                                                 onClick={() => handlePickWinner(submission.user)}
-                                                disabled={pickingWinner || isPickingWinner}
+                                                disabled={isLoading === 'pickWinner'}
                                                 className="bg-gradient-to-r from-green-600 to-emerald-600"
                                             >
-                                                {pickingWinner ? "Selecting..." : "Pick Winner"}
+                                                {isLoading === 'pickWinner' ? (
+                                                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                                ) : (
+                                                    <Trophy className="w-3 h-3 mr-1" />
+                                                )}
+                                                Pick Winner
                                             </Button>
                                         )}
                                     </div>
-                                    {task.winner === submission.user && (
-                                        <div className="mt-2 flex items-center gap-2 text-green-600">
-                                            <CheckCircle className="w-4 h-4" />
-                                            <span className="text-sm font-semibold">Winner!</span>
-                                        </div>
-                                    )}
                                 </div>
                             ))}
                         </div>
@@ -275,7 +327,9 @@ const TaskCard: React.FC<TaskCardProps> = ({ id }) => {
                 )}
 
                 {task.submissions.length === 0 && (
-                    <p className="text-gray-500 text-center py-4">No submissions yet</p>
+                    <div className="pt-2 border-t">
+                        <p className="text-center text-muted-foreground text-sm py-4">No submissions yet</p>
+                    </div>
                 )}
             </CardContent>
         </Card>

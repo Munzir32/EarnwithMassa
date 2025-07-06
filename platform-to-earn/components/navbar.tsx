@@ -4,22 +4,22 @@ import { useState } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Menu, X, Wallet, LogOut } from "lucide-react"
-import { ConnectButton } from "@rainbow-me/rainbowkit"
-import { useAccount } from "wagmi"
+import { Menu, X, Wallet, LogOut, Loader2 } from "lucide-react"
+import { useWallet } from "@/hooks/useWallet"
+
 export default function Navbar() {
   const [isOpen, setIsOpen] = useState(false)
-  const [walletConnected, setWalletConnected] = useState(false)
-  const [walletAddress] = useState("0x1234...5678")
+  const { 
+    isConnected, 
+    address, 
+    balance, 
+    connect, 
+    disconnect, 
+    isConnecting 
+  } = useWallet()
 
-  const { address, isConnected } = useAccount()
-
-  const connectWallet = () => {
-    setWalletConnected(true)
-  }
-
-  const disconnectWallet = () => {
-    setWalletConnected(false)
+  const formatAddress = (addr: string) => {
+    return `${addr.slice(0, 8)}...${addr.slice(-6)}`
   }
 
   return (
@@ -48,27 +48,38 @@ export default function Navbar() {
               Reputation Demo
             </Link>
 
-            <ConnectButton />
-
-            {/* {walletConnected ? (
+            {isConnected && address ? (
               <div className="flex items-center space-x-3">
                 <Badge variant="outline" className="font-mono text-xs">
-                  {walletAddress}
+                  {formatAddress(address)}
                 </Badge>
-                <Button variant="outline" size="sm" onClick={disconnectWallet} className="flex items-center gap-2">
+                <Badge variant="secondary" className="text-xs">
+                  {balance || "0 MAS"}
+                </Badge>
+                <Button variant="outline" size="sm" onClick={disconnect} className="flex items-center gap-2">
                   <LogOut className="w-4 h-4" />
                   Disconnect
                 </Button>
               </div>
             ) : (
               <Button
-                onClick={connectWallet}
+                onClick={connect}
+                disabled={isConnecting}
                 className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
               >
-                <Wallet className="w-4 h-4 mr-2" />
-                Connect Wallet
+                {isConnecting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Connecting...
+                  </>
+                ) : (
+                  <>
+                    <Wallet className="w-4 h-4 mr-2" />
+                    Connect Wallet
+                  </>
+                )}
               </Button>
-            )} */}
+            )}
           </div>
 
           {/* Mobile menu button */}
@@ -105,17 +116,18 @@ export default function Navbar() {
                 Reputation Demo
               </Link>
 
-              <ConnectButton />
-
-              {/* {walletConnected ? (
+              {isConnected && address ? (
                 <div className="flex flex-col space-y-2">
                   <Badge variant="outline" className="font-mono text-xs w-fit">
-                    {walletAddress}
+                    {formatAddress(address)}
+                  </Badge>
+                  <Badge variant="secondary" className="text-xs w-fit">
+                    {balance || "0 MAS"}
                   </Badge>
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={disconnectWallet}
+                    onClick={disconnect}
                     className="flex items-center gap-2 w-fit"
                   >
                     <LogOut className="w-4 h-4" />
@@ -124,13 +136,23 @@ export default function Navbar() {
                 </div>
               ) : (
                 <Button
-                  onClick={connectWallet}
+                  onClick={connect}
+                  disabled={isConnecting}
                   className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 w-fit"
                 >
-                  <Wallet className="w-4 h-4 mr-2" />
-                  Connect Wallet
+                  {isConnecting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Connecting...
+                    </>
+                  ) : (
+                    <>
+                      <Wallet className="w-4 h-4 mr-2" />
+                      Connect Wallet
+                    </>
+                  )}
                 </Button>
-              )} */}
+              )}
             </div>
           </div>
         )}

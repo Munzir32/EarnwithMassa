@@ -11,9 +11,10 @@ import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Plus, AlertCircle } from "lucide-react"
-import { useWriteContract } from "wagmi"
+import { toast } from "@/hooks/use-toast"
+import { useWallet } from "@/hooks/useWallet"
 import { contract } from "@/contract"
-import ABI from "@/contract/ABI.json"
+import { SmartContract, Args } from "@massalabs/massa-web3"
 import { PlatformIPFS } from "@/lib/ipfsUpload"
 import Manage from "@/components/Manage"
 
@@ -52,9 +53,7 @@ export default function AdminPage() {
   const [rewardToken, setRewardToken] = useState("")
   const [rewardAmount, setRewardAmount] = useState("")
 
-  const { writeContractAsync } = useWriteContract()
-
-  const token = "0x33B8d1D5841A989ca3F1566158CE96e260Ff4376"
+  const { isConnected, address, provider } = useWallet()
 
   // Mock data - replace with actual smart contract calls
   useEffect(() => {
@@ -120,74 +119,183 @@ export default function AdminPage() {
     }, 1000)
   }, [])
 
+  const validateMassaAddress = (address: string) => {
+    return /^AU[0-9A-Za-z]{48,50}$/.test(address)
+  }
+
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    if (!isConnected) {
+      toast({
+        title: "Wallet Not Connected",
+        description: "Please connect your wallet first",
+        variant: "destructive",
+      })
+      return
+    }
+
+    if (!provider) {
+      toast({
+        title: "Wallet Provider Not Available",
+        description: "Please ensure your wallet is properly connected",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Check wallet balance before proceeding
+    try {
+      const balanceValue = await provider.balance(true)
+      if (balanceValue < BigInt(100000000)) { // Require at least 0.1 MAS for fees (in nanoMAS)
+        toast({
+          title: "Insufficient Balance",
+          description: `You need at least 0.1 MAS for transaction fees. Current balance: ${balanceValue} MAS`,
+          variant: "destructive",
+        })
+        return
+      }
+    } catch (error) {
+      console.error('Error checking balance:', error)
+      toast({
+        title: "Balance Check Failed",
+        description: "Unable to verify wallet balance. Please try again.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Validate addresses
+    // if (!validateMassaAddress(tokenGate)) {
+    //   toast({
+    //     title: "Invalid Token Gate Address",
+    //     description: "Please enter a valid Massa address (starts with AU)",
+    //     variant: "destructive",
+    //   })
+    //   return
+    // }
+
+    // if (!validateMassaAddress(rewardToken)) {
+    //   toast({
+    //     title: "Invalid Reward Token Address",
+    //     description: "Please enter a valid Massa address (starts with AU)",
+    //     variant: "destructive",
+    //   })
+    //   return
+    // }
+
+    if (!rewardAmount || Number.parseFloat(rewardAmount) <= 0) {
+      toast({
+        title: "Invalid Reward Amount",
+        description: "Please enter a valid reward amount greater than 0",
+        variant: "destructive",
+      })
+      return
+    }
+
     setCreating(true)
 
-    // Mock task creation - replace with actual smart contract call
-    // setTimeout(() => {
-    //   const newTask: Task = {
-    //     id: tasks.length,
-    //     title,
-    //     description,
-    //     tokenGate,
-    //     tokenSymbol,
-    //     rewardToken,
-    //     rewardAmount,
-    //     submissions: [],
-    //     maxSubmissions: 3,
-    //     status: "Open",
-    //     creator: "0x9876543210fedcba9876543210fedcba98765432",
-    //   }
+    try {
+      // Upload task details to IPFS
+      const res = await PlatformIPFS({
+        title: title,
+        description: description,
+        tokenSymbol: tokenSymbol
+      })
 
-    //   setTasks([...tasks, newTask])
+      // Prepare arguments for createTask function
+      const args = new Args()
+        .addString(tokenGate) // tokenGate address
+        .addString(rewardToken) // rewardToken address
+        .addU64(BigInt(rewardAmount)) // rewardAmount
+        .addString(res) // IPFS details
 
-      try {
-          const res = await PlatformIPFS({
-            title: title,
-            description: description,
-            tokenSymbol: tokenSymbol
-          })
+      console.log("Creating task with params:", {
+        tokenGate,
+        rewardToken,
+        rewardAmount,
+        ipfsDetails: res
+      })
 
+      // Create smart contract instance and call the function
+      const taskContract = new SmartContract(provider, contract)
+      const result = await taskContract.call('createTask', args)
 
-          const response = await writeContractAsync({
-            address: contract,
-            abi: ABI,
-            functionName: "createTask",
-            args: [tokenGate, tokenGate, 2, res]
-          })
-          
-          console.log(response)
+      console.log("Contract call result:", result)
 
-          setTitle("")
-          setDescription("")
-          setTokenGate("")
-          setTokenSymbol("")
-          setRewardToken("")
-          setRewardAmount("")
-      } catch (error) {
-        console.log(error)
-      }
+      toast({
+        title: "Task Created Successfully",
+        description: "Your task has been created and is now live!",
+      })
 
       // Reset form
-     
+      setTitle("")
+      setDescription("")
+      setTokenGate("")
+      setTokenSymbol("")
+      setRewardToken("")
+      setRewardAmount("")
 
+    } catch (error) {
+      console.error("Error creating task:", error)
+      toast({
+        title: "Failed to Create Task",
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+        variant: "destructive",
+      })
+    } finally {
       setCreating(false)
-    // }, 2000)
+    }
   }
 
   const handlePickWinner = async (taskId: number, winnerAddress: string) => {
+    if (!isConnected || !provider) {
+      toast({
+        title: "Wallet Not Connected",
+        description: "Please connect your wallet first",
+        variant: "destructive",
+      })
+      return
+    }
+
     setPickingWinner(taskId)
 
-    // Mock winner selection - replace with actual smart contract call
-    setTimeout(() => {
+    try {
+      // Prepare arguments for pickWinner function
+      const args = new Args()
+        .addU64(BigInt(taskId)) // taskId
+        .addString(winnerAddress) // winner address
+
+      console.log("Picking winner for task:", taskId, "Winner:", winnerAddress)
+
+      // Create smart contract instance and call the function
+      const taskContract = new SmartContract(provider, contract)
+      const result = await taskContract.call('pickWinner', args)
+
+      console.log("Pick winner result:", result)
+
+      // Update local state
       setTasks(
         tasks.map((task) =>
           task.id === taskId ? { ...task, status: "Closed" as const, winner: winnerAddress } : task,
         ),
       )
+
+      toast({
+        title: "Winner Selected Successfully",
+        description: `Winner: ${winnerAddress.slice(0, 8)}...${winnerAddress.slice(-6)}`,
+      })
+
+    } catch (error) {
+      console.error("Error picking winner:", error)
+      toast({
+        title: "Failed to Pick Winner",
+        description: error instanceof Error ? error.message : "Unknown error occurred",
+        variant: "destructive",
+      })
+    } finally {
       setPickingWinner(null)
-    }, 2000)
+    }
   }
 
   const formatAddress = (address: string) => {
@@ -280,7 +388,7 @@ export default function AdminPage() {
                           id="tokenGate"
                           value={tokenGate}
                           onChange={(e) => setTokenGate(e.target.value)}
-                          placeholder="0x..."
+                          placeholder="AU..."
                           required
                           className="mt-1"
                         />
@@ -306,7 +414,7 @@ export default function AdminPage() {
                           id="rewardToken"
                           value={rewardToken}
                           onChange={(e) => setRewardToken(e.target.value)}
-                          placeholder="0x..."
+                          placeholder="AU..."
                           required
                           className="mt-1"
                         />
@@ -333,10 +441,23 @@ export default function AdminPage() {
                       </AlertDescription>
                     </Alert>
 
+                    {!isConnected ? (
+                      <Alert>
+                        <AlertCircle className="h-4 w-4" />
+                        <AlertDescription>
+                          Please connect your Massa wallet to create tasks.
+                        </AlertDescription>
+                      </Alert>
+                    ) : (
+                      <div className="text-sm text-gray-600 mb-4">
+                        Connected as: {address ? `${address.slice(0, 8)}...${address.slice(-6)}` : 'Unknown'}
+                      </div>
+                    )}
+
                     <Button
                       type="submit"
                       className="w-full bg-gradient-to-r from-purple-600 to-blue-600"
-                      disabled={creating}
+                      disabled={creating || !isConnected}
                     >
                       {creating ? "Creating Task..." : "Create Task"}
                     </Button>

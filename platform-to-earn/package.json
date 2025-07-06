@@ -9,7 +9,16 @@
     "start": "next start"
   },
   "dependencies": {
-    "@hookform/resolvers": "^3.9.1",
+    "@as-pect/cli": "^8.1.0",
+    "@assemblyscript/loader": "^0.28.2",
+    "@hookform/resolvers": "^5.1.1",
+    "@massalabs/as-types": "^2.1.0",
+    "@massalabs/eslint-config": "^0.0.13",
+    "@massalabs/massa-as-sdk": "^3.0.2",
+    "@massalabs/massa-sc-compiler": "^0.2.0",
+    "@massalabs/massa-web3": "^5.2.0",
+    "@massalabs/prettier-config-as": "^0.0.2",
+    "@massalabs/wallet-provider": "^3.2.0",
     "@radix-ui/react-accordion": "1.2.2",
     "@radix-ui/react-alert-dialog": "1.1.4",
     "@radix-ui/react-aspect-ratio": "1.1.1",

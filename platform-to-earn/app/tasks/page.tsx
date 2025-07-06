@@ -6,9 +6,9 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {  Search, Filter } from "lucide-react"
 import Taskgrid from "@/components/Taskgrid"
-import { useReadContract } from "wagmi"
+import { useWallet } from "@/hooks/useWallet"
 import { contract } from "@/contract"
-import ABI from "@/contract/ABI.json"
+import { SmartContract, Args, bytesToStr } from "@massalabs/massa-web3"
 
 
 
@@ -17,45 +17,60 @@ export default function TasksPage() {
   const [statusFilter, setStatusFilter] = useState("all")
   const [taskIds, setTaskIds] = useState<Map<string, string>>(new Map())
   const [loading, setLoading] = useState(true)
+  const [taskCounter, setTaskCounter] = useState<bigint>(BigInt(0))
 
-  const { data: taskCounter, refetch: refetchTaskCounter } = useReadContract({
-    address: contract as `0x${string}`,
-    abi: ABI,
-    functionName: 'taskCounter',
-  })
+  const { isConnected, provider } = useWallet()
 
-  const getTaskIds = useCallback(() => {
-    try {
-      if (!taskCounter) {
-        console.log("taskCounter is undefined or null");
-        return;
-      }
-
-      const newMap = new Map<string, string>();
-      if (typeof taskCounter === 'bigint' && taskCounter > 0) {
-        for (let i = 0; i < taskCounter; i++) {
-          newMap.set(i.toString(), i.toString()); 
-        }
-        setTaskIds(new Map(newMap));
-      } else {
-        console.log("taskCounter isn't valid bigint:", taskCounter);
-      }
-    } catch (error) {
-      console.error("Error setting task IDs:", error);
+  const fetchTaskCounter = useCallback(async () => {
+    if (!isConnected || !provider) {
+      setLoading(false)
+      return
     }
-  }, [taskCounter])
 
-  useEffect(() => {
-    getTaskIds()
-  }, [taskCounter, getTaskIds])
-
-  useEffect(() => {
-    if (!taskCounter) {
-      setLoading(true)
-    } else {
+    try {
+      console.log("TasksPage: Fetching task counter...")
+      const taskContract = new SmartContract(provider, contract)
+      
+      // Add timeout to the contract call
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), 30000) // 30 second timeout
+      })
+      
+      const resultPromise = taskContract.read('taskCounter')
+      const result = await Promise.race([resultPromise, timeoutPromise]) as any
+      
+      console.log("TasksPage: Raw task counter result:", result)
+      console.log("TasksPage: Result value:", result.value)
+      
+      // Parse the task counter correctly - it returns a Uint8Array that needs to be converted to string first
+      const counterStr = bytesToStr(result.value)
+      const counter = parseInt(counterStr)
+      console.log("TasksPage: Parsed task counter:", counter)
+      
+      setTaskCounter(BigInt(counter))
+      
+      const newMap = new Map<string, string>()
+      if (counter > 0) {
+        console.log(`TasksPage: Creating ${counter} task IDs`)
+        for (let i = 0; i < counter; i++) {
+          newMap.set(i.toString(), i.toString())
+        }
+        setTaskIds(newMap)
+      }
+      console.log("TasksPage: Task IDs map:", newMap)
+    } catch (error) {
+      console.error("TasksPage: Error fetching task counter:", error)
+      // Set default values to prevent infinite loading
+      setTaskCounter(BigInt(0))
+      setTaskIds(new Map())
+    } finally {
       setLoading(false)
     }
-  }, [taskCounter])
+  }, [isConnected, provider])
+
+  useEffect(() => {
+    fetchTaskCounter()
+  }, [fetchTaskCounter])
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -120,9 +135,40 @@ export default function TasksPage() {
         </div>
 
         {/* Tasks Grid */}
-        {taskIds.size === 0 ? (
+        {!isConnected ? (
           <div className="text-center py-12">
-            <p className="text-gray-600 text-lg">No tasks found on blockchain.</p>
+            <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mb-6 max-w-2xl mx-auto">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <div className="w-5 h-5 text-blue-400">🔗</div>
+                </div>
+                <div className="ml-3">
+                  <p className="text-sm text-blue-700">
+                    <strong>Wallet Required:</strong> Please connect your Massa Station wallet to view tasks from the blockchain.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <p className="text-gray-600 text-lg mb-4">Connect your wallet to view tasks</p>
+            <p className="text-sm text-gray-500">Tasks are stored on the Massa blockchain and require wallet connection to access.</p>
+          </div>
+        ) : taskIds.size === 0 ? (
+          <div className="text-center py-12">
+            <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6 max-w-2xl mx-auto">
+              <div className="flex">
+                <div className="flex-shrink-0">
+                  <div className="w-5 h-5 text-yellow-400">⚠️</div>
+                </div>
+                <div className="ml-3">
+                  <p className="text-sm text-yellow-700">
+                    <strong>Demo Mode:</strong> No tasks found on blockchain. 
+                    This could be due to network timeout or no tasks have been created yet.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <p className="text-gray-600 text-lg mb-4">No tasks found on blockchain.</p>
+            <p className="text-sm text-gray-500">Try refreshing or check your network connection.</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 max-w-7xl mx-auto">
@@ -132,12 +178,6 @@ export default function TasksPage() {
                 taskId={value}
               />
             ))}
-          </div>
-        )}
-
-        {taskIds.size === 0 && (
-          <div className="text-center py-12">
-            <p className="text-gray-600 text-lg">No tasks found matching your criteria.</p>
           </div>
         )}
       </div>

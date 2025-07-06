@@ -1,8 +1,9 @@
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Trophy, Users, Coins, ArrowRight, Zap, Shield, Target } from "lucide-react"
+import { Trophy, Users, Coins, ArrowRight, Zap, Shield, Target, Wallet } from "lucide-react"
 import Link from "next/link"
+import { WalletConnect } from "@/components/WalletConnect"
 
 export default function HomePage() {
   return (
@@ -45,6 +46,11 @@ export default function HomePage() {
                 Post a Task
               </Button>
             </Link>
+          </div>
+
+          {/* Wallet Connection Section */}
+          <div className="max-w-md mx-auto mb-16">
+            <WalletConnect />
           </div>
         </div>
 
